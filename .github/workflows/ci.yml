@@ -1,0 +1,190 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "22"
+  PNPM_VERSION: "10.19.0"
+  DATABASE_URL: postgresql+asyncpg://sqc_test:local_ci@127.0.0.1:5432/sqc_test
+  TEST_DATABASE_URL: postgresql+asyncpg://sqc_test:local_ci@127.0.0.1:5432/sqc_test
+  ENVIRONMENT: test
+
+jobs:
+  static:
+    name: Static checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.20"
+          enable-cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: |
+            frontend/pnpm-lock.yaml
+            e2e/pnpm-lock.yaml
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+      - name: Require external sanitization terms
+        shell: bash
+        env:
+          SANITIZE_DENY_TERMS: ${{ secrets.SANITIZE_DENY_TERMS }}
+        run: |
+          set +x
+          if [[ -z "${SANITIZE_DENY_TERMS:-}" ]]; then
+            printf '%s\n' '::error::Required sanitization terms are not configured.' >&2
+            exit 1
+          fi
+      - name: Test sanitization gate
+        run: python -I -m pytest -q -c backend/pyproject.toml .github/scripts/test_sanitize.py
+      - name: Validate shareable content
+        shell: bash
+        env:
+          SANITIZE_DENY_TERMS: ${{ secrets.SANITIZE_DENY_TERMS }}
+        run: |
+          set +x
+          python -I .github/scripts/sanitize.py .
+      - name: Validate Compose model
+        run: docker compose config --quiet
+      - name: Install backend dependencies
+        working-directory: backend
+        run: uv sync --frozen
+      - name: Lint backend
+        working-directory: backend
+        run: uv run ruff check .
+      - name: Check backend formatting
+        working-directory: backend
+        run: uv run ruff format --check .
+      - name: Type-check backend
+        working-directory: backend
+        run: uv run pyright
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+      - name: Lint frontend
+        working-directory: frontend
+        run: pnpm lint
+      - name: Type-check frontend
+        working-directory: frontend
+        run: pnpm typecheck
+      - name: Test frontend
+        working-directory: frontend
+        run: pnpm test
+      - name: Build frontend
+        working-directory: frontend
+        run: pnpm build
+      - name: Install end-to-end dependencies
+        working-directory: e2e
+        run: pnpm install --frozen-lockfile
+      - name: Lint end-to-end suite
+        working-directory: e2e
+        run: pnpm lint
+      - name: Type-check end-to-end suite
+        working-directory: e2e
+        run: pnpm typecheck
+
+  backend:
+    name: Backend with PostgreSQL
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: sqc_test
+          POSTGRES_USER: sqc_test
+          POSTGRES_PASSWORD: local_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sqc_test -d sqc_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.20"
+          enable-cache: true
+      - name: Install dependencies
+        working-directory: backend
+        run: uv sync --frozen
+      - name: Run backend tests
+        working-directory: backend
+        run: uv run python -m pytest --junitxml=test-results/backend.xml
+      - name: Upload backend report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-report
+          path: backend/test-results/backend.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+  containers:
+    name: Compose and browser flows
+    runs-on: ubuntu-24.04
+    needs: [static, backend]
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: e2e/pnpm-lock.yaml
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+      - name: Build application images
+        run: docker compose build
+      - name: Start healthy demo stack
+        run: docker compose up --wait --wait-timeout 180
+      - name: Install browser test dependencies
+        working-directory: e2e
+        run: pnpm install --frozen-lockfile
+      - name: Install Chromium
+        working-directory: e2e
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Run browser flows
+        working-directory: e2e
+        env:
+          E2E_BASE_URL: http://127.0.0.1:8080
+        run: pnpm test
+      - name: Capture Compose logs
+        if: always()
+        run: docker compose logs --no-color > compose.log
+      - name: Upload browser and service reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-test-report
+          path: |
+            e2e/playwright-report/
+            e2e/test-results/
+            compose.log
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Stop stack
+        if: always()
+        run: docker compose down --volumes --remove-orphans

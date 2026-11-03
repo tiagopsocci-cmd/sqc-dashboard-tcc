@@ -1,0 +1,115 @@
+name: ${E2E_COMPOSE_PROJECT:-sqc-dashboard-e2e}
+
+x-e2e-app-environment: &e2e-app-environment
+  DATABASE_URL: postgresql+asyncpg://sqc_e2e:e2e_only@db:5432/sqc_e2e
+  STORAGE_ROOT: /data/storage
+  ENVIRONMENT: demo
+
+x-e2e-backend-image: &e2e-backend-image
+  build:
+    context: ./backend
+  image: sqc-dashboard-tcc-backend:e2e
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: sqc_e2e
+      POSTGRES_USER: sqc_e2e
+      POSTGRES_PASSWORD: e2e_only
+    volumes:
+      - e2e-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sqc_e2e -d sqc_e2e"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    networks: [e2e-internal]
+
+  migrate:
+    <<: *e2e-backend-image
+    command: ["alembic", "upgrade", "head"]
+    environment: *e2e-app-environment
+    volumes:
+      - e2e-app-storage:/data/storage
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    networks: [e2e-internal]
+
+  seed:
+    <<: *e2e-backend-image
+    command: ["python", "-m", "app.seed"]
+    environment:
+      <<: *e2e-app-environment
+      SEED_PROFILE: synthetic-demo
+    volumes:
+      - e2e-app-storage:/data/storage
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+    networks: [e2e-internal]
+
+  backend:
+    <<: *e2e-backend-image
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment: *e2e-app-environment
+    volumes:
+      - e2e-app-storage:/data/storage
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      seed:
+        condition: service_completed_successfully
+    expose:
+      - "8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    networks: [e2e-internal]
+
+  frontend:
+    build:
+      context: ./frontend
+    image: sqc-dashboard-tcc-frontend:e2e
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${E2E_FRONTEND_PORT:-18080}:8080"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget --quiet --tries=1 --spider http://127.0.0.1:8080/ || exit 1",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    networks:
+      - e2e-internal
+      - e2e-edge
+
+volumes:
+  e2e-postgres-data:
+  e2e-app-storage:
+
+networks:
+  e2e-internal:
+    internal: true
+  e2e-edge:

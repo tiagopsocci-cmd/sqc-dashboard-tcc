@@ -1,0 +1,15 @@
+repos:
+  - repo: local
+    hooks:
+      - id: sanitize-shareable-tree
+        name: sanitização do conteúdo compartilhável
+        entry: python -I .github/scripts/sanitize.py .
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: compose-config
+        name: validação do Docker Compose
+        entry: docker compose config --quiet
+        language: system
+        pass_filenames: false
+        files: '(^|/)docker-compose\.ya?ml$'
