@@ -32,6 +32,10 @@ jobs:
         with:
           version: "0.11.20"
           enable-cache: true
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -39,10 +43,6 @@ jobs:
           cache-dependency-path: |
             frontend/pnpm-lock.yaml
             e2e/pnpm-lock.yaml
-      - uses: pnpm/action-setup@v4
-        with:
-          version: ${{ env.PNPM_VERSION }}
-          run_install: false
       - name: Require external sanitization terms
         shell: bash
         env:
@@ -147,15 +147,15 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
           cache-dependency-path: e2e/pnpm-lock.yaml
-      - uses: pnpm/action-setup@v4
-        with:
-          version: ${{ env.PNPM_VERSION }}
-          run_install: false
       - name: Build application images
         run: docker compose build
       - name: Start healthy demo stack
