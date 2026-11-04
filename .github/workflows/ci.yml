@@ -43,6 +43,9 @@ jobs:
           cache-dependency-path: |
             frontend/pnpm-lock.yaml
             e2e/pnpm-lock.yaml
+      - name: Install backend dependencies
+        working-directory: backend
+        run: uv sync --frozen
       - name: Require external sanitization terms
         shell: bash
         env:
@@ -54,7 +57,8 @@ jobs:
             exit 1
           fi
       - name: Test sanitization gate
-        run: python -I -m pytest -q -c backend/pyproject.toml .github/scripts/test_sanitize.py
+        working-directory: backend
+        run: uv run python -I -m pytest -q -c pyproject.toml ../.github/scripts/test_sanitize.py
       - name: Validate shareable content
         shell: bash
         env:
@@ -64,9 +68,6 @@ jobs:
           python -I .github/scripts/sanitize.py .
       - name: Validate Compose model
         run: docker compose config --quiet
-      - name: Install backend dependencies
-        working-directory: backend
-        run: uv sync --frozen
       - name: Lint backend
         working-directory: backend
         run: uv run ruff check .
